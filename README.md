@@ -12,7 +12,7 @@ exchanges and back, and how every step is expressed in FIX.
 ```bash
 python -m fixsim.server               # terminal 1: FIX acceptor on 127.0.0.1:9878
 python -m fixsim.client               # terminal 2: scripted client walks the order lifecycle
-python -m pytest                      # 33 tests, under a second
+python -m pytest                      # 87 tests, under two seconds
 ```
 
 Python 3.10+ with no runtime dependencies (pytest for the tests).
@@ -34,8 +34,8 @@ Python 3.10+ with no runtime dependencies (pytest for the tests).
   <- OrderCancelReject  Order already filled
 ```
 
-The full script also covers an IOC remainder cancel, a listed-option order, a business reject, a TWAP
-worked in three slices, TestRequest/Heartbeat and Logout.
+The full script also covers an IOC remainder cancel, a listed-option order, an order rejected for an
+unknown symbol (39=8, 103=1), a TWAP worked in three slices, TestRequest/Heartbeat and Logout.
 
 ## How it fits together
 
@@ -59,11 +59,11 @@ the highest maker rebate. IOC and market remainders are canceled, and FOK is all
 
 | Area | Detail |
 |---|---|
-| FIX codec | Tag=value encoding with BodyLength (9) and CheckSum (10), strict validation, TCP stream framing |
-| Session | Logon handshake, MsgSeqNum enforcement (too low: Logout; gap: ResendRequest), TestRequest/Heartbeat, session Reject (35=3) |
+| FIX codec | Tag=value encoding with BodyLength (9) and CheckSum (10), strict validation (empty, repeated and malformed tags), TCP stream framing however the bytes arrive |
+| Session | Logon validation, MsgSeqNum enforcement and gap recovery (ResendRequest, SequenceReset GapFill/Reset, PossDup with OrigSendingTime), TestRequest/Heartbeat, CompID checks, session Reject (35=3), BusinessMessageReject (35=j); several clients at once, one session per CompID, each report routed only to the order's owner |
 | Messages | NewOrderSingle (D), OrderCancelRequest (F), OrderCancelReplaceRequest (G), ExecutionReport (8), OrderCancelReject (9) |
-| Order lifecycle | New, Partially filled, Filled, Pending cancel, Canceled, Pending replace, Replaced, Rejected; CumQty / LeavesQty / AvgPx reconciled on every report |
-| Venues | Limit order books with price-time priority, maker-taker fees, self-trade prevention |
+| Order lifecycle | New, Partially filled, Filled, Pending cancel, Canceled, Pending replace, Rejected (Replaced is an ExecType, not a status, in FIX 4.4); CumQty / LeavesQty / AvgPx reconciled on every report |
+| Venues | Limit order books with price-time priority, maker-taker fees, self-trade prevention per client |
 | Products | U.S. equities, and listed options (SecurityType OPT with expiry, put/call and strike) |
 | Strategy | TWAP via TargetStrategy 847=1000 and TargetStrategyParameters 848 |
 
@@ -71,17 +71,18 @@ the highest maker rebate. IOC and market remainders are canceled, and FOK is all
 
 | Document | Contents |
 |---|---|
-| [Requirements](docs/requirements.md) | Stakeholders, business requirements, 18 functional requirements with acceptance criteria, non-functional requirements, scope limits |
-| [Message flows](docs/message-flows.md) | Sequence diagrams between client, router and venues for every flow |
+| [Requirements](docs/requirements.md) | Stakeholders, business requirements, 21 functional requirements with acceptance criteria, non-functional requirements, scope limits |
+| [Message flows](docs/message-flows.md) | Sequence diagrams between client, router and venues for the main flows |
 | [Order lifecycle](docs/order-lifecycle.md) | State diagram, ExecType vs OrdStatus, quantity rules with a worked example |
 | [Data model](docs/data-model.md) | Entity-relationship diagram, entity dictionary, identifier rules |
-| [FIX tag mapping](docs/fix-tag-mapping.md) | Every tag in and out, whether it is required, where it lives in the model, and its validation rule |
+| [FIX tag mapping](docs/fix-tag-mapping.md) | The header, session and application tags in and out, whether each is required, where it lives in the model, and its validation rule |
 | [Test scenarios](docs/test-scenarios.md) | Use cases and a traceability matrix from each requirement to its tests |
 
 ## Deliberate simplifications
 
-No message store or gap fill, one client session at a time, no outbound heartbeat timer, no market-data
-feed or NBBO, and no Reg NMS order-protection checks. Fees drive routing but are not reported back.
+No message store (a client's resend request is answered with a gap fill, not a replay, and reports for a
+client that is not logged on are dropped), no outbound heartbeat timer, no market-data feed or NBBO, and no
+Reg NMS order-protection checks. Fees drive routing but are not reported back.
 Details are in [requirements §6](docs/requirements.md#6-out-of-scope-and-simplifications).
 
 ## Layout

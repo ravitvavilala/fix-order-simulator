@@ -41,7 +41,7 @@ def test_marketable_order_fills_completely_at_volume_weighted_average(engine):
 
 def test_day_limit_remainder_rests_on_best_rebate_venue_and_fills_later(engine):
     engine.handle(new_order(order_qty=400, price=190.00))
-    order = engine.by_cl_ord_id["C1"]
+    order = engine.by_cl_ord_id["CLIENT1", "C1"]
     assert order.cum_qty == 300 and engine.router.resting_qty(order) == 100
     out = engine.on_external_trade("SIMC", AAPL, taker_is_buy=False, qty=100, price=190.00)
     er = reports(out)[0]
@@ -56,7 +56,7 @@ def test_cancel_goes_through_pending_cancel_and_keeps_cum_qty(engine):
     final = reports(out)[-1]
     assert (final.get(Tag.CL_ORD_ID), final.get(Tag.ORIG_CL_ORD_ID)) == ("C2", "C1")
     assert final.get(Tag.CUM_QTY) == 300 and final.get(Tag.LEAVES_QTY) == 0
-    assert engine.router.resting_qty(engine.by_cl_ord_id["C2"]) == 0
+    assert engine.router.resting_qty(engine.by_cl_ord_id["CLIENT1", "C2"]) == 0
 
 
 @pytest.mark.parametrize("setup, orig, reason", [
@@ -76,7 +76,7 @@ def test_replace_reprices_and_reroutes_the_remaining_quantity(engine):
     out = engine.handle(replace("C1", "C2", qty=500, price=190.01))
     assert statuses(out)[:2] == [(ExecType.PENDING_REPLACE, OrdStatus.PENDING_REPLACE),
                                  (ExecType.REPLACED, OrdStatus.PARTIALLY_FILLED)]
-    order = engine.by_cl_ord_id["C2"]
+    order = engine.by_cl_ord_id["CLIENT1", "C2"]
     assert order.qty == 500 and order.price == 190.01 and order.cum_qty == 500
     assert order.cl_ord_id_history == ["C1"]
     assert_quantities_consistent(out)
@@ -98,7 +98,7 @@ def test_replace_below_filled_quantity_is_refused(engine):
 def test_invalid_orders_are_rejected_with_a_reason(engine, fields, reason):
     out = engine.handle(new_order(**fields))
     assert statuses(out) == [(ExecType.REJECTED, OrdStatus.REJECTED)]
-    assert out[0].get(Tag.ORD_REJ_REASON) == reason
+    assert out[0].get(Tag.ORD_REJ_REASON) == reason and out[0].get(Tag.TEXT)
 
 
 def test_duplicate_cl_ord_id_is_rejected(engine):
@@ -118,12 +118,31 @@ def test_ioc_cancels_the_unfilled_remainder(engine):
     out = engine.handle(new_order(order_qty=400, price=190.00, time_in_force="3"))
     assert statuses(out)[-1] == (ExecType.CANCELED, OrdStatus.CANCELED)
     assert reports(out)[-1].get(Tag.CUM_QTY) == 300
+    assert reports(out)[-1].get(Tag.TEXT) == "IOC: unfilled quantity canceled"
+
+
+def test_market_order_cancels_what_the_book_cannot_fill(engine):
+    out = engine.handle(new_order(ord_type="1", price=None, order_qty=2000, time_in_force="0"))
+    last = reports(out)[-1]
+    assert (last.get(Tag.EXEC_TYPE), last.get(Tag.CUM_QTY), last.get(Tag.LEAVES_QTY)) == (ExecType.CANCELED, 1450, 0)
+    assert last.get(Tag.TEXT) == "Market order: unfilled quantity canceled"
+
+
+def test_cl_ord_id_is_unique_per_client_and_a_client_cannot_touch_another_clients_order(engine):
+    engine.handle(new_order(cl_ord_id="C1", order_qty=50))
+    theirs = new_order(cl_ord_id="C1", order_qty=50)
+    theirs.fields = [(t, "CLIENT2" if t == Tag.SENDER_COMP_ID else v) for t, v in theirs.fields]
+    assert statuses(engine.handle(theirs))[0] == (ExecType.NEW, OrdStatus.NEW)
+    steal = cancel("C1", "X1")
+    steal.fields = [(t, "CLIENT3" if t == Tag.SENDER_COMP_ID else v) for t, v in steal.fields]
+    refused = engine.handle(steal)[0]
+    assert (refused.msg_type, refused.get(Tag.CXL_REJ_REASON)) == (MsgType.ORDER_CANCEL_REJECT, 1)
 
 
 def test_fok_without_enough_liquidity_is_canceled_with_no_fills(engine):
     out = engine.handle(new_order(order_qty=10_000, price=190.00, time_in_force="4"))
     assert statuses(out) == [(ExecType.NEW, OrdStatus.NEW), (ExecType.CANCELED, OrdStatus.CANCELED)]
-    assert engine.by_cl_ord_id["C1"].cum_qty == 0
+    assert engine.by_cl_ord_id["CLIENT1", "C1"].cum_qty == 0
 
 
 def test_market_order_sweeps_the_book(engine):
@@ -138,13 +157,13 @@ def test_option_order_routes_and_reports_contract_fields(engine):
     final = reports(out)[-1]
     assert final.get(Tag.ORD_STATUS) == OrdStatus.FILLED
     assert (final.get(Tag.PUT_OR_CALL), final.get(Tag.STRIKE_PRICE)) == ("1", 450.0)
-    assert engine.by_cl_ord_id["C1"].instrument == SPY_CALL
+    assert engine.by_cl_ord_id["CLIENT1", "C1"].instrument == SPY_CALL
 
 
 def test_twap_releases_slices_over_time_and_completes(engine, clock):
     out = engine.handle(new_order(order_qty=300, price=190.02, target_strategy=1000,
                                   target_strategy_parameters="slices=3;interval=60"))
-    order = engine.by_cl_ord_id["C1"]
+    order = engine.by_cl_ord_id["CLIENT1", "C1"]
     assert order.cum_qty == 100
     clock.now = 59
     assert engine.tick() == []
@@ -155,3 +174,83 @@ def test_twap_releases_slices_over_time_and_completes(engine, clock):
     engine.tick()
     assert order.status == OrdStatus.FILLED and not engine.twaps
     assert_quantities_consistent(out)
+
+
+def test_taker_fills_are_flagged_as_removing_liquidity(engine):
+    out = engine.handle(new_order(order_qty=250, price=190.00))
+    assert {er.get(Tag.LAST_LIQUIDITY_IND) for er in reports(out)[1:]} == {2}
+
+
+def test_cancel_pulls_the_resting_child_from_the_venue_book(engine):
+    engine.handle(new_order(order_qty=400, price=190.00))
+    simc = engine.router.venues["SIMC"]
+    assert simc.resting_for_parent("ORD000001") == 100
+    engine.handle(cancel("C1", "C2"))
+    assert simc.resting_for_parent("ORD000001") == 0
+
+
+def test_cancel_must_name_the_current_cl_ord_id(engine):
+    engine.handle(new_order(order_qty=400, price=190.00))
+    engine.handle(replace("C1", "C2", qty=400, price=190.00))
+    out = engine.handle(cancel("C1", "C3"))
+    assert out[0].msg_type == MsgType.ORDER_CANCEL_REJECT and out[0].get(Tag.CXL_REJ_REASON) == 1
+
+
+def test_market_fok_checks_all_liquidity_not_a_price(engine):
+    out = engine.handle(new_order(order_qty=450, ord_type="1", price=190.00, time_in_force="4"))
+    assert statuses(out)[-1] == (ExecType.TRADE, OrdStatus.FILLED)
+
+
+def test_twap_must_be_a_day_order(engine):
+    out = engine.handle(new_order(order_qty=300, time_in_force="3", target_strategy=1000,
+                                  target_strategy_parameters="slices=3;interval=60"))
+    assert statuses(out) == [(ExecType.REJECTED, OrdStatus.REJECTED)]
+
+
+@pytest.mark.parametrize("fields", [
+    dict(price="inf"),
+    dict(price="nan"),
+    dict(price="1e3"),
+    dict(price="190_00"),
+    dict(price=" 190"),
+    dict(target_strategy=1000, target_strategy_parameters="slices=3;interval=nan"),
+])
+def test_prices_must_be_plain_finite_decimals(engine, fields):
+    out = engine.handle(new_order(**fields))
+    assert statuses(out) == [(ExecType.REJECTED, OrdStatus.REJECTED)]
+
+
+@pytest.mark.parametrize("strike", ["450.001", "450.0000001"])
+def test_option_strike_must_match_exactly(engine, strike):
+    out = engine.handle(new_order(symbol="SPY", security_type="OPT", maturity_month_year="202612",
+                                  put_or_call="1", strike_price=strike, order_qty=5, price=12.40))
+    assert out[0].get(Tag.ORD_REJ_REASON) == 1
+
+
+def test_an_equity_symbol_never_matches_an_option_book(engine):
+    out = engine.handle(new_order(symbol="SPY 202612 C 450", order_qty=5, price=12.40))
+    assert out[0].get(Tag.ORD_REJ_REASON) == 1
+
+
+def test_rejected_option_order_never_carries_empty_tags(engine):
+    out = engine.handle(new_order(symbol="SPY", security_type="OPT", order_qty=5, price=12.40))
+    assert all(v is not None for _, v in out[0].fields)
+
+
+def test_missing_transact_time_is_a_session_reject(engine):
+    msg = new_order()
+    msg.fields = [(t, v) for t, v in msg.fields if t != Tag.TRANSACT_TIME]
+    out = engine.handle(msg)
+    assert out[0].msg_type == MsgType.REJECT and out[0].get(Tag.REF_TAG_ID) == Tag.TRANSACT_TIME
+
+
+def test_same_client_orders_do_not_cross_but_other_clients_do(engine):
+    engine.handle(new_order(cl_ord_id="B1", order_qty=400, price=190.00))
+    buy = engine.by_cl_ord_id["CLIENT1", "B1"]
+    mine = engine.handle(new_order(cl_ord_id="S1", side="2", order_qty=50, price=189.99, time_in_force="3"))
+    assert buy.order_id not in {er.get(Tag.ORDER_ID) for er in reports(mine)}
+    assert engine.router.resting_qty(buy) == 100
+    other = new_order(cl_ord_id="S2", side="2", order_qty=50, price=190.00, time_in_force="3")
+    other.fields = [(t, "CLIENT2" if t == Tag.SENDER_COMP_ID else v) for t, v in other.fields]
+    out = engine.handle(other)
+    assert ("SIMC", 1) in {(er.get(Tag.LAST_MKT), er.get(Tag.LAST_LIQUIDITY_IND)) for er in reports(out)}

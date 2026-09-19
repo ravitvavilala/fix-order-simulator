@@ -15,6 +15,7 @@ class Resting:
     price: float
     qty: int
     parent_id: str | None = None
+    owner: str | None = None
     seq: int = field(default_factory=lambda: next(_seq))
 
 
@@ -33,37 +34,34 @@ class Venue:
         self.mic = mic
         self.take_fee = take_fee
         self.make_rebate = make_rebate
-        self._books: dict[str, list[Resting]] = {}
+        self._books: dict[tuple, list[Resting]] = {}
 
-    def lists(self, key: str) -> bool:
+    def lists(self, key: tuple) -> bool:
         return key in self._books
 
-    def seed(self, key: str, is_buy: bool, price: float, qty: int) -> None:
+    def seed(self, key: tuple, is_buy: bool, price: float, qty: int) -> None:
         self._books.setdefault(key, []).append(Resting(f"EXT-{next(_seq)}", is_buy, price, qty))
 
-    def _opposite(self, key: str, is_buy: bool, limit: float | None, parent_id: str | None) -> list[Resting]:
+    def _opposite(self, key: tuple, is_buy: bool, limit: float | None, owner: str | None) -> list[Resting]:
+        """Opposite-side resting orders, best first; skips the same client's orders (self-trade prevention)."""
         book = self._books.get(key, [])
-        side = [
-            r
-            for r in book
-            if r.is_buy != is_buy and (parent_id is None or r.parent_id != parent_id)
-        ]
+        side = [r for r in book if r.is_buy != is_buy and (owner is None or r.owner != owner)]
         if limit is not None:
             side = [r for r in side if (r.price <= limit if is_buy else r.price >= limit)]
         return sorted(side, key=lambda r: (r.price if is_buy else -r.price, r.seq))
 
-    def levels(self, key: str, is_buy: bool, limit: float | None, parent_id: str | None = None) -> list[tuple[float, int]]:
+    def levels(self, key: tuple, is_buy: bool, limit: float | None, owner: str | None = None) -> list[tuple[float, int]]:
         """Aggregated opposite-side liquidity an order on `is_buy` side could take, best price first."""
         out: dict[float, int] = {}
-        for r in self._opposite(key, is_buy, limit, parent_id):
+        for r in self._opposite(key, is_buy, limit, owner):
             out[r.price] = out.get(r.price, 0) + r.qty
         return sorted(out.items(), key=lambda kv: kv[0] if is_buy else -kv[0])
 
-    def submit(self, ref: str, parent_id: str | None, key: str, is_buy: bool, qty: int,
+    def submit(self, ref: str, parent_id: str | None, owner: str | None, key: tuple, is_buy: bool, qty: int,
                limit: float | None, rest_remainder: bool) -> list[Fill]:
         fills: list[Fill] = []
         remaining = qty
-        for resting in self._opposite(key, is_buy, limit, parent_id):
+        for resting in self._opposite(key, is_buy, limit, owner):
             if remaining == 0:
                 break
             take = min(remaining, resting.qty)
@@ -72,9 +70,10 @@ class Venue:
             fills.append(Fill(self.mic, ref, parent_id, resting.price, take, added_liquidity=False))
             if resting.parent_id is not None:
                 fills.append(Fill(self.mic, resting.ref, resting.parent_id, resting.price, take, added_liquidity=True))
-        self._books[key] = [r for r in self._books.get(key, []) if r.qty > 0]
-        if remaining and rest_remainder and limit is not None:
-            self._books.setdefault(key, []).append(Resting(ref, is_buy, limit, remaining, parent_id))
+        if key in self._books:
+            self._books[key] = [r for r in self._books[key] if r.qty > 0]
+        if remaining and rest_remainder and limit is not None and key in self._books:
+            self._books[key].append(Resting(ref, is_buy, limit, remaining, parent_id, owner))
         return fills
 
     def cancel(self, ref: str) -> int:
@@ -86,3 +85,6 @@ class Venue:
 
     def resting_qty(self, ref: str) -> int:
         return sum(r.qty for book in self._books.values() for r in book if r.ref == ref)
+
+    def resting_for_parent(self, parent_id: str) -> int:
+        return sum(r.qty for book in self._books.values() for r in book if r.parent_id == parent_id)

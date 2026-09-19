@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 
 class OrdStatus:
@@ -63,7 +64,7 @@ ALLOWED_TRANSITIONS: dict[str | None, set[str]] = {
         OrdStatus.CANCELED,
     },
     OrdStatus.PENDING_CANCEL: {OrdStatus.CANCELED},
-    OrdStatus.PENDING_REPLACE: {OrdStatus.NEW, OrdStatus.PARTIALLY_FILLED, OrdStatus.FILLED},
+    OrdStatus.PENDING_REPLACE: {OrdStatus.NEW, OrdStatus.PARTIALLY_FILLED},
     OrdStatus.FILLED: set(),
     OrdStatus.CANCELED: set(),
     OrdStatus.REJECTED: set(),
@@ -80,18 +81,25 @@ class Instrument:
     security_type: str = "CS"
     maturity: str | None = None
     put_or_call: str | None = None
-    strike: float | None = None
+    strike: Decimal | None = None
 
     @property
     def is_option(self) -> bool:
         return self.security_type == "OPT"
 
     @property
-    def key(self) -> str:
+    def key(self) -> tuple:
+        """Book key. Decimal strikes compare exactly, and an equity symbol can never collide with an option."""
+        if not self.is_option:
+            return ("CS", self.symbol)
+        return ("OPT", self.symbol, self.maturity, self.put_or_call, self.strike)
+
+    @property
+    def label(self) -> str:
         if not self.is_option:
             return self.symbol
         right = "C" if self.put_or_call == "1" else "P"
-        return f"{self.symbol} {self.maturity} {right} {self.strike:.2f}"
+        return f"{self.symbol} {self.maturity} {right} {self.strike.normalize():f}"
 
     @property
     def multiplier(self) -> int:
@@ -108,6 +116,7 @@ class Order:
     ord_type: str
     price: float | None
     tif: str
+    owner: str = "CLIENT"
     status: str | None = None
     cum_qty: int = 0
     notional: float = 0.0

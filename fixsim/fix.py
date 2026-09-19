@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 SOH = "\x01"
@@ -15,7 +16,14 @@ class Tag:
     SENDER_COMP_ID = 49
     TARGET_COMP_ID = 56
     MSG_SEQ_NUM = 34
+    NEW_SEQ_NO = 36
+    POSS_DUP_FLAG = 43
     SENDING_TIME = 52
+    TRANSACT_TIME = 60
+    ORIG_SENDING_TIME = 122
+    GAP_FILL_FLAG = 123
+    REF_MSG_TYPE = 372
+    BUSINESS_REJECT_REASON = 380
     CHECKSUM = 10
     AVG_PX = 6
     BEGIN_SEQ_NO = 7
@@ -61,6 +69,7 @@ class MsgType:
     TEST_REQUEST = "1"
     RESEND_REQUEST = "2"
     REJECT = "3"
+    SEQUENCE_RESET = "4"
     LOGOUT = "5"
     EXECUTION_REPORT = "8"
     ORDER_CANCEL_REJECT = "9"
@@ -68,15 +77,52 @@ class MsgType:
     NEW_ORDER_SINGLE = "D"
     ORDER_CANCEL_REQUEST = "F"
     ORDER_CANCEL_REPLACE_REQUEST = "G"
+    BUSINESS_MESSAGE_REJECT = "j"
+
+    DEFINED = (set("0123456789ABCDEFGHJKLMNPQRSTVWXYZabcdefghijklmnopqrstuvwxyz")
+               | {f"A{c}" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"} | {f"B{c}" for c in "ABCDEFGH"})
+
+    @classmethod
+    def is_defined(cls, value: str) -> bool:
+        """FIX 4.4 message types; values starting with U are reserved for user-defined messages."""
+        return value in cls.DEFINED or value.startswith("U")
+
+
+class RejectReason:
+    INVALID_TAG_NUMBER = 0
+    REQUIRED_TAG_MISSING = 1
+    TAG_WITHOUT_VALUE = 4
+    VALUE_INCORRECT = 5
+    INCORRECT_DATA_FORMAT = 6
+    COMP_ID_PROBLEM = 9
+    INVALID_MSG_TYPE = 11
+    TAG_APPEARS_MORE_THAN_ONCE = 13
+
+
+_KNOWN_TAGS = {v for k, v in vars(Tag).items() if not k.startswith("_")}
+_HEADER = re.compile(rb"8=FIX[^\x01]*\x019=\d+\x0135=")
 
 
 class FixError(ValueError):
-    pass
+    """A garbled message: framing, BodyLength or CheckSum is wrong. The spec says ignore it."""
+
+
+class BeginStringError(FixError):
+    """Wrong protocol version. The spec says end the session."""
+
+
+class FieldError(FixError):
+    """The message is intact but a field is invalid. The spec says send a session Reject (35=3)."""
+
+    def __init__(self, text: str, ref_tag: int | None, reason: int):
+        super().__init__(text)
+        self.ref_tag, self.reason = ref_tag, reason
 
 
 @dataclass
 class Message:
     fields: list[tuple[int, str]] = field(default_factory=list)
+    error: FieldError | None = None
 
     @property
     def msg_type(self) -> str:
@@ -97,7 +143,7 @@ class Message:
 
 def _fmt(value: object) -> str:
     if isinstance(value, float):
-        return f"{value:.4f}".rstrip("0").rstrip(".") or "0"
+        return f"{value:.8f}".rstrip("0").rstrip(".") or "0"
     return str(value)
 
 
@@ -105,6 +151,9 @@ def encode(body: list[tuple[int, object]]) -> bytes:
     """Wrap body fields (starting with 35=MsgType) with BeginString, BodyLength and CheckSum."""
     if not body or body[0][0] != Tag.MSG_TYPE:
         raise FixError("body must start with tag 35 (MsgType)")
+    empty = next((t for t, v in body if v is None or str(v) == ""), None)
+    if empty is not None:
+        raise FixError(f"tag {empty} has no value")
     body_str = "".join(f"{t}={_fmt(v)}{SOH}" for t, v in body)
     head = f"{Tag.BEGIN_STRING}={BEGIN_STRING}{SOH}{Tag.BODY_LENGTH}={len(body_str.encode())}{SOH}"
     raw = (head + body_str).encode()
@@ -112,30 +161,42 @@ def encode(body: list[tuple[int, object]]) -> bytes:
 
 
 def decode(raw: bytes) -> Message:
-    """Parse and validate one complete message; raises FixError on any framing or integrity fault."""
-    text = raw.decode("ascii", errors="strict")
+    """Check integrity (garbled: FixError), then protocol version, then fields (first problem kept in .error)."""
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise FixError("message is not ASCII") from exc
     if not text.endswith(SOH):
         raise FixError("message must end with SOH")
-    pairs = []
-    for part in text[:-1].split(SOH):
-        tag, sep, value = part.partition("=")
-        if not sep or not tag.isdigit() or value == "":
-            raise FixError(f"malformed field {part!r}")
-        pairs.append((int(tag), value))
-    tags = [t for t, _ in pairs]
-    if tags[:3] != [Tag.BEGIN_STRING, Tag.BODY_LENGTH, Tag.MSG_TYPE] or tags[-1] != Tag.CHECKSUM:
-        raise FixError("header must be 8, 9, 35 and trailer must be 10")
-    if pairs[0][1] != BEGIN_STRING:
-        raise FixError(f"unsupported BeginString {pairs[0][1]}")
-    checksum_at = text.rfind(f"{SOH}{Tag.CHECKSUM}=") + 1
-    body_start = text.index(SOH, text.index(SOH) + 1) + 1
-    body_len = len(text[body_start:checksum_at].encode())
-    if body_len != int(pairs[1][1]):
-        raise FixError(f"BodyLength {pairs[1][1]} does not match actual {body_len}")
+    head = re.match(rf"8=([^{SOH}]*){SOH}9=(\d+){SOH}35=", text)
+    trailer = re.search(rf"{SOH}10=(\d{{3}}){SOH}$", text)
+    if not head or not trailer:
+        raise FixError("header must start 8, 9, 35 and the trailer must be 10=nnn")
+    checksum_at = trailer.start() + 1
+    body_len = len(text[head.end(2) + 1:checksum_at].encode())
+    if body_len != int(head.group(2)):
+        raise FixError(f"BodyLength {head.group(2)} does not match actual {body_len}")
     expected = sum(text[:checksum_at].encode()) % 256
-    if f"{expected:03d}" != pairs[-1][1]:
-        raise FixError(f"CheckSum {pairs[-1][1]} does not match computed {expected:03d}")
-    return Message(pairs)
+    if f"{expected:03d}" != trailer.group(1):
+        raise FixError(f"CheckSum {trailer.group(1)} does not match computed {expected:03d}")
+    if head.group(1) != BEGIN_STRING:
+        raise BeginStringError(f"unsupported BeginString {head.group(1)}")
+    pairs: list[tuple[int, str]] = []
+    error = None
+    for part in text[:-1].split(SOH):
+        tag, _, value = part.partition("=")
+        if not tag.isdigit() or tag.startswith("0"):
+            error = error or FieldError(f"invalid tag number {tag!r}", None, RejectReason.INVALID_TAG_NUMBER)
+            continue
+        number = int(tag)
+        if number in _KNOWN_TAGS and any(t == number for t, _ in pairs):
+            error = error or FieldError(f"tag {number} appears more than once", number,
+                                        RejectReason.TAG_APPEARS_MORE_THAN_ONCE)
+            continue
+        if value == "":
+            error = error or FieldError(f"tag {number} has no value", number, RejectReason.TAG_WITHOUT_VALUE)
+        pairs.append((number, value))
+    return Message(pairs, error)
 
 
 def split_frames(buffer: bytes) -> tuple[list[bytes], bytes]:
@@ -143,14 +204,17 @@ def split_frames(buffer: bytes) -> tuple[list[bytes], bytes]:
     frames = []
     marker = f"{SOH}{Tag.CHECKSUM}=".encode()
     while True:
-        start = buffer.find(f"{Tag.BEGIN_STRING}=".encode())
-        if start < 0:
-            return frames, b""
-        buffer = buffer[start:]
+        head = _HEADER.search(buffer)
+        if head is None:
+            partial = buffer.rfind(b"8=", max(0, len(buffer) - 64))
+            return frames, buffer[partial:] if partial >= 0 else buffer[-1:] if buffer.endswith(b"8") else b""
+        buffer = buffer[head.start():]
         trailer = buffer.find(marker)
-        if trailer < 0:
-            return frames, buffer
-        end = buffer.find(SOH.encode(), trailer + len(marker))
+        end = buffer.find(SOH.encode(), trailer + len(marker)) if trailer >= 0 else -1
+        following = _HEADER.search(buffer, 1)
+        if following and (end < 0 or following.start() < end):
+            buffer = buffer[following.start():]
+            continue
         if end < 0:
             return frames, buffer
         frames.append(buffer[: end + 1])

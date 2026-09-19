@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from fixsim.model import Instrument
 from fixsim.venue import Venue
 
 AAPL = Instrument("AAPL")
 MSFT = Instrument("MSFT")
-SPY_CALL = Instrument("SPY", "OPT", maturity="202612", put_or_call="1", strike=450.0)
+SPY_CALL = Instrument("SPY", "OPT", maturity="202612", put_or_call="1", strike=Decimal("450"))
 
 BUY, SELL = True, False
 

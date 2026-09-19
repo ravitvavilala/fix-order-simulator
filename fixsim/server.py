@@ -9,26 +9,21 @@ import logging
 from fixsim.engine import OrderManager
 from fixsim.market import default_venues
 from fixsim.router import SmartOrderRouter
-from fixsim.session import FixSession
+from fixsim.session import FixSession, deliver
 
 
 async def start(host: str = "127.0.0.1", port: int = 9878, tick_seconds: float = 0.5):
-    """Start the acceptor; returns (server, engine). One client at a time, as in a single-desk simulator."""
+    """Start the acceptor; returns (server, engine). One live session per SenderCompID."""
     engine = OrderManager(SmartOrderRouter(default_venues()))
-    current: dict[str, FixSession] = {}
+    sessions: dict[str, FixSession] = {}
 
     async def on_connect(reader, writer):
-        session = FixSession(engine)
-        current["session"] = session
-        await session.run(reader, writer)
+        await FixSession(engine, sessions).run(reader, writer)
 
     async def ticker():
         while True:
             await asyncio.sleep(tick_seconds)
-            session = current.get("session")
-            outbound = engine.tick()
-            if session and session.logged_on and outbound:
-                await session.push(outbound)
+            await deliver(sessions, engine.tick())
 
     server = await asyncio.start_server(on_connect, host, port)
     server.ticker = asyncio.create_task(ticker())

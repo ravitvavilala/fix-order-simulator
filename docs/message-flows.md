@@ -1,7 +1,8 @@
 # Message flows
 
 Participants: the **Client** (buy-side OMS), the **Router** (FIX acceptor + order manager + smart order
-router), and three simulated venues with different fee models.
+router), and three simulated venues with different fee models. Prices go on the wire without trailing zeros
+(190.00 is sent as 44=190).
 
 | Venue | Take fee | Maker rebate | Role in routing |
 |---|---|---|---|
@@ -30,16 +31,17 @@ sequenceDiagram
     participant B as SIMB
     participant A as SIMA
     participant V as SIMC
-    C->>R: NewOrderSingle 35=D, 11=A1, 55=AAPL, 54=1, 38=400, 40=2, 44=190.00, 59=0
+    C->>R: NewOrderSingle 35=D, 11=A1, 55=AAPL, 54=1, 38=400, 40=2, 44=190, 59=0, 60=<time>
     R->>C: ExecutionReport 150=0 New, 39=0, 151=400
     Note over R: Plan: 190.00 on SIMB (fee 0.0010) then SIMA (0.0030)
     R->>B: IOC child buy 100 @ 190.00
     B-->>R: fill 100 @ 190.00
-    R->>C: ExecutionReport 150=F, 39=1, 32=100, 31=190.00, 30=SIMB, 851=2, 14=100, 151=300
     R->>A: IOC child buy 200 @ 190.00
     A-->>R: fill 200 @ 190.00
-    R->>C: ExecutionReport 150=F, 39=1, 32=200, 30=SIMA, 14=300, 151=100
     R->>V: DAY child buy 100 @ 190.00 (rests for the 0.0032 rebate)
+    Note over R: Routing finishes first, then one report per fill
+    R->>C: ExecutionReport 150=F, 39=1, 32=100, 31=190, 30=SIMB, 851=2, 14=100, 151=300
+    R->>C: ExecutionReport 150=F, 39=1, 32=200, 30=SIMA, 14=300, 151=100
 ```
 
 ## 3. Resting child is hit later
@@ -99,7 +101,31 @@ sequenceDiagram
     R->>C: OrderCancelReject 35=9, 434=1, 102=0 Too late to cancel (the order is unchanged)
 ```
 
-## 7. TWAP (847=1000, 848=slices=3;interval=60)
+## 7. Gap recovery
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant R as Router
+    C->>R: Heartbeat 34=3 (2 was lost)
+    R->>C: ResendRequest 35=2, 7=2, 16=0
+    C->>R: NewOrderSingle 11=G1, 34=4
+    Note over R: Above the expected number: discarded, no second ResendRequest
+    C->>R: SequenceReset 35=4, 34=2, 43=Y, 122=<orig time>, 123=Y, 36=4 (GapFill over 2 and the Heartbeat at 3)
+    C->>R: NewOrderSingle 11=G1, 34=4, 43=Y, 122=<orig time> (resent)
+    R->>C: ExecutionReport 150=0, 11=G1
+    C->>R: TestRequest 34=5, 112=AFTER-GAP
+    R->>C: Heartbeat 112=AFTER-GAP
+```
+
+Session messages (Heartbeat, TestRequest, ResendRequest, Logout, Logon) are gap-filled, never resent;
+application messages are resent with PossDupFlag and OrigSendingTime. A ResendRequest or Logout that
+arrives above the expected number is acted on at once.
+
+A client's own ResendRequest is answered with SequenceReset 35=4, 43=Y, 122, 123=Y, 36=the number after
+the requested range (the next outbound number when 16=0), because the acceptor keeps no message store.
+
+## 8. TWAP (847=1000, 848=slices=3;interval=60)
 
 ```mermaid
 sequenceDiagram

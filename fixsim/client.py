@@ -6,20 +6,21 @@ import argparse
 import asyncio
 
 from fixsim.fix import Message, MsgType, Tag, decode, encode, split_frames
-from fixsim.session import utc_timestamp
+from fixsim.session import APPLICATION, utc_timestamp
 
 EXEC_TYPE = {"0": "New", "4": "Canceled", "5": "Replaced", "6": "PendingCancel", "8": "Rejected",
              "E": "PendingReplace", "F": "Trade"}
 ORD_STATUS = {"0": "New", "1": "PartiallyFilled", "2": "Filled", "4": "Canceled", "6": "PendingCancel",
               "8": "Rejected", "E": "PendingReplace"}
-MSG_NAME = {"0": "Heartbeat", "2": "ResendRequest", "3": "Reject", "5": "Logout", "8": "ExecutionReport",
-            "9": "OrderCancelReject", "A": "Logon"}
+MSG_NAME = {"0": "Heartbeat", "2": "ResendRequest", "3": "Reject", "4": "SequenceReset", "5": "Logout",
+            "8": "ExecutionReport", "9": "OrderCancelReject", "A": "Logon", "j": "BusinessMessageReject"}
 
 
 class FixClient:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, sender: str = "CLIENT1"):
         self.reader, self.writer, self.sender = reader, writer, sender
         self.seq = 1
+        self.eof = False
         self._buffer = b""
         self._pending: list[Message] = []
 
@@ -29,6 +30,8 @@ class FixClient:
         return cls(reader, writer, sender)
 
     async def send(self, msg_type: str, fields: list[tuple[int, object]], seq: int | None = None) -> None:
+        if msg_type in APPLICATION and not any(t == Tag.TRANSACT_TIME for t, _ in fields):
+            fields = [*fields, (Tag.TRANSACT_TIME, utc_timestamp())]
         body = [(Tag.MSG_TYPE, msg_type), (Tag.SENDER_COMP_ID, self.sender), (Tag.TARGET_COMP_ID, "SIMROUTER"),
                 (Tag.MSG_SEQ_NUM, seq if seq is not None else self.seq), (Tag.SENDING_TIME, utc_timestamp()), *fields]
         if seq is None:
@@ -43,6 +46,7 @@ class FixClient:
             except asyncio.TimeoutError:
                 return None
             if not chunk:
+                self.eof = True
                 return None
             frames, self._buffer = split_frames(self._buffer + chunk)
             self._pending += [decode(f) for f in frames]
@@ -114,7 +118,7 @@ async def main(host: str, port: int) -> None:
                    MsgType.NEW_ORDER_SINGLE,
                    order("O1", "SPY", "1", 30, 12.40, extra=((Tag.SECURITY_TYPE, "OPT"), (Tag.MATURITY_MONTH_YEAR, "202612"),
                                                              (Tag.PUT_OR_CALL, "1"), (Tag.STRIKE_PRICE, 450))))
-    await scenario(client, "6. Unknown symbol: business reject",
+    await scenario(client, "6. Unknown symbol: order rejected (ExecutionReport 39=8, OrdRejReason 103=1)",
                    MsgType.NEW_ORDER_SINGLE, order("Z1", "ZZZZ", "1", 10, 5.00))
     await scenario(client, "7. TWAP buy 150 MSFT @ 410.15 in 3 slices, 1s apart (TargetStrategy 847=1000)",
                    MsgType.NEW_ORDER_SINGLE,
