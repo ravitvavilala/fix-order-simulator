@@ -1,4 +1,4 @@
-"""Run the simulated router as a FIX 4.4 acceptor: python -m fixsim.server [--port 9878]"""
+"""Run the simulated router as a FIX 4.2 / 4.4 acceptor: python -m fixsim.server [--port 9878]"""
 
 from __future__ import annotations
 

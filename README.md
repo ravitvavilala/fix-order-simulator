@@ -1,6 +1,6 @@
 # FIX Order Routing Simulator
 
-A small, working model of an equity and options order router: a **FIX 4.4 acceptor over TCP/IP**, an
+A small, working model of an equity and options order router: a **FIX 4.2 and 4.4 acceptor over TCP/IP**, an
 **order state machine**, a **smart order router** across three simulated venues, and a **TWAP** strategy,
 with the business-analysis documents you would write for it.
 
@@ -12,7 +12,8 @@ exchanges and back, and how every step is expressed in FIX.
 ```bash
 python -m fixsim.server               # terminal 1: FIX acceptor on 127.0.0.1:9878
 python -m fixsim.client               # terminal 2: scripted client walks the order lifecycle
-python -m pytest                      # 87 tests, under two seconds
+python -m fixsim.client --begin-string FIX.4.2   # the same script over a FIX 4.2 session
+python -m pytest                      # 103 tests, under two seconds
 ```
 
 Python 3.10+ with no runtime dependencies (pytest for the tests).
@@ -41,7 +42,7 @@ unknown symbol (39=8, 103=1), a TWAP worked in three slices, TestRequest/Heartbe
 
 ```mermaid
 flowchart LR
-    C[Client OMS] -- FIX 4.4 over TCP --> S[Session<br/>logon, MsgSeqNum,<br/>heartbeat]
+    C[Client OMS] -- FIX 4.2 / 4.4 over TCP --> S[Session<br/>logon, MsgSeqNum,<br/>heartbeat]
     S --> E[Order manager<br/>validation, state machine,<br/>execution reports]
     E --> T[TWAP scheduler]
     E --> R[Smart order router]
@@ -61,6 +62,7 @@ the highest maker rebate. IOC and market remainders are canceled, and FOK is all
 |---|---|
 | FIX codec | Tag=value encoding with BodyLength (9) and CheckSum (10), strict validation (empty, repeated and malformed tags), TCP stream framing however the bytes arrive |
 | Session | Logon validation, MsgSeqNum enforcement and gap recovery (ResendRequest, SequenceReset GapFill/Reset, PossDup with OrigSendingTime), TestRequest/Heartbeat, CompID checks, session Reject (35=3), BusinessMessageReject (35=j); several clients at once, one session per CompID, each report routed only to the order's owner |
+| FIX versions | FIX 4.2 and FIX 4.4, chosen per session by the Logon's BeginString. The router works in FIX 4.4 terms and a dialect layer translates 4.2 at the session edge: HandlInst (21) required, ExecTransType (20) added, fills as ExecType 1/2 instead of F, OrdStatus 5 Replaced by 4.2 precedence, no LastLiquidityInd (851), reject reason codes mapped to values 4.2 defines |
 | Messages | NewOrderSingle (D), OrderCancelRequest (F), OrderCancelReplaceRequest (G), ExecutionReport (8), OrderCancelReject (9) |
 | Order lifecycle | New, Partially filled, Filled, Pending cancel, Canceled, Pending replace, Rejected (Replaced is an ExecType, not a status, in FIX 4.4); CumQty / LeavesQty / AvgPx reconciled on every report |
 | Venues | Limit order books with price-time priority, maker-taker fees, self-trade prevention per client |
@@ -71,7 +73,7 @@ the highest maker rebate. IOC and market remainders are canceled, and FOK is all
 
 | Document | Contents |
 |---|---|
-| [Requirements](docs/requirements.md) | Stakeholders, business requirements, 21 functional requirements with acceptance criteria, non-functional requirements, scope limits |
+| [Requirements](docs/requirements.md) | Stakeholders, business requirements, 22 functional requirements with acceptance criteria, non-functional requirements, scope limits |
 | [Message flows](docs/message-flows.md) | Sequence diagrams between client, router and venues for the main flows |
 | [Order lifecycle](docs/order-lifecycle.md) | State diagram, ExecType vs OrdStatus, quantity rules with a worked example |
 | [Data model](docs/data-model.md) | Entity-relationship diagram, entity dictionary, identifier rules |
@@ -88,9 +90,9 @@ Details are in [requirements §6](docs/requirements.md#6-out-of-scope-and-simpli
 ## Layout
 
 ```
-fixsim/  fix.py (codec) · session.py (TCP session) · engine.py (order manager, TWAP) · router.py (SOR)
+fixsim/  fix.py (codec) · fix42.py (FIX 4.2 dialect) · session.py (TCP session) · engine.py (order manager, TWAP) · router.py (SOR)
          venue.py (order books) · model.py (order, state machine) · market.py (venues, quotes)
          server.py · client.py
-tests/   codec, order lifecycle, venue matching, TCP session
+tests/   codec, order lifecycle, venue matching, TCP session, FIX 4.2 sessions
 docs/    requirements, message flows, lifecycle, data model, tag mapping, test scenarios
 ```

@@ -317,11 +317,12 @@ class OrderManager:
 
     def _cancel_reject(self, order: Order | None, cl: str, orig: str, response_to: str,
                        reason: int, text: str) -> Outbound:
+        known = order is not None and reason != CxlRejReason.UNKNOWN_ORDER
         return Outbound(MsgType.ORDER_CANCEL_REJECT, [
-            (Tag.ORDER_ID, order.order_id if order else "NONE"),
+            (Tag.ORDER_ID, order.order_id if known else "NONE"),
             (Tag.CL_ORD_ID, cl),
             (Tag.ORIG_CL_ORD_ID, orig),
-            (Tag.ORD_STATUS, order.status if order else OrdStatus.REJECTED),
+            (Tag.ORD_STATUS, order.status if known else OrdStatus.REJECTED),
             (Tag.CXL_REJ_RESPONSE_TO, response_to),
             (Tag.CXL_REJ_REASON, reason),
             (Tag.TEXT, text),

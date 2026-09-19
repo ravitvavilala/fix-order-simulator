@@ -6,9 +6,9 @@ R = required, C = conditional, O = optional. "Model" is where the value lives in
 
 | Tag | Name | Req | Model | Rule |
 |---|---|---|---|---|
-| 8 | BeginString | R | (checked) | FIX.4.4, else Logout |
+| 8 | BeginString | R | `FixSession.begin_string` | FIX.4.2 or FIX.4.4, fixed at Logon; another value at Logon closes the connection with no reply; a different version later in the session ends it with Logout |
 | 9, 10 | BodyLength, CheckSum | R | (checked) | Wrong: message ignored as garbled |
-| 35 | MsgType | R | `Message.msg_type` | Not defined in FIX 4.4: Reject 373=11; defined but unsupported: 35=j 380=3 |
+| 35 | MsgType | R | `Message.msg_type` | Not defined in the session's FIX version: Reject 373=11; defined but unsupported: 35=j 380=3 |
 | 49 | SenderCompID | R | `FixSession.target_comp_id`, `Order.owner` | Fixed at Logon; must match on every message, else Reject 373=9 and Logout. Keys self-trade prevention and report routing |
 | 56 | TargetCompID | R | `FixSession.sender_comp_id` | Must be SIMROUTER, else Reject 373=9 and Logout (at Logon: close with no reply) |
 | 34 | MsgSeqNum | R | `FixSession.next_in` | Missing or non-numeric: Logout; too low: Logout unless 43=Y; gap: ResendRequest |
@@ -76,7 +76,26 @@ R = required, C = conditional, O = optional. "Model" is where the value lives in
 
 | Message | Tags |
 |---|---|
-| 35=9 | 37 (or `NONE`), 11, 41, 39, 434 (1 = cancel, 2 = replace), 102 (0 too late, 1 unknown order, 6 duplicate ClOrdID, 99 other), 58 |
+| 35=9 | 37 (`NONE` when 102=1 Unknown order, with 39=8), 11, 41, 39, 434 (1 = cancel, 2 = replace), 102 (0 too late, 1 unknown order, 6 duplicate ClOrdID, 99 other), 58 |
 | 35=3 | 45 RefSeqNum, 371 RefTagID, 373 SessionRejectReason (0 invalid tag number, 1 required tag missing, 4 tag without value, 5 incorrect value, 6 incorrect data format, 9 CompID problem, 11 invalid MsgType, 13 tag appears more than once), 58 |
 | 35=j | 45 RefSeqNum, 372 RefMsgType, 380 BusinessRejectReason (3 = unsupported message type), 58 |
 | 35=4 | SequenceReset: 43 PossDupFlag=Y, 122 OrigSendingTime, 123 GapFillFlag=Y, 36 NewSeqNo (answer to a client ResendRequest) |
+
+## FIX 4.2 sessions
+
+The router works in FIX 4.4 terms; `fixsim/fix42.py` translates at the session edge. Differences, from the
+FIX 4.2 dictionary:
+
+| Item | FIX 4.4 | FIX 4.2 (this router) |
+|---|---|---|
+| HandlInst (21) on D and G | Optional | Required: 1, 2 or 3; missing is Reject 371=21, 373=1; other values 373=5 |
+| ExecTransType (20) on 35=8 | Not used | Required; always 0 (New) |
+| Fill report ExecType (150) | F Trade | 1 Partial fill, or 2 Fill when OrdStatus is 2 |
+| Replace confirmation (150=5) OrdStatus | Current state, 0 or 1 | 5 Replaced when nothing has filled, else 1 (precedence: Partially filled > Replaced > New) |
+| LastLiquidityInd (851) | Sent on fills | Not defined in 4.2, not sent |
+| SessionRejectReason 13 (repeated tag) | Sent | Not defined in 4.2 (values end at 11); the Reject is sent without 373 |
+| TargetStrategy (847/848) | Standard tags | Not in 4.2; accepted on 4.2 sessions the same way |
+| OrdRejReason (103) 13, 99 and CxlRejReason (102) 6, 99 | Sent | Not in 4.2 (103 ends at 8, 102 at 3): sent as 103=0 / 102=2 Broker option, reason kept in Text (58) |
+| MsgType check | FIX 4.4 list | FIX 4.2 list: single characters up to m, plus U-prefixed private types; others get Reject 373=11 |
+| OrdStatus 5 Replaced | Not used | On the replace confirmation only; later reports for the order carry its current status (0 or 1) |
+| OrderQty (38) | Required | 4.2 allows CashOrderQty (152) instead; not supported, so a D or G without 38 still gets Reject 371=38, 373=1 |

@@ -42,6 +42,10 @@ ExecType says **what just happened**; OrdStatus says **where the order is now**.
 | Replace done | 5 Replaced | 0 or 1, the current state (FIX 4.4 no longer uses 39=5) |
 | Rejected | 8 Rejected | 8 Rejected |
 
+On a FIX 4.2 session the same events report fills as ExecType 1 (partial) and 2 (fill), and a replace
+confirmation carries OrdStatus 5 Replaced unless the order has fills, because 4.2 ranks Partially filled
+above Replaced and Replaced above New. See [FIX tag mapping](fix-tag-mapping.md#fix-42-sessions).
+
 ## Quantity rules (checked on every report)
 
 - `CumQty (14)` = sum of fill quantities.

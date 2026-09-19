@@ -1,4 +1,4 @@
-"""FIX 4.4 acceptor session over TCP: logon, sequence numbers and recovery, heartbeats, dispatch."""
+"""FIX 4.2 / 4.4 acceptor session over TCP: logon, sequence numbers and recovery, heartbeats, dispatch."""
 
 from __future__ import annotations
 
@@ -6,8 +6,10 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+from fixsim import fix42
 from fixsim.engine import OrderManager, Outbound
 from fixsim.fix import (
+    BEGIN_STRING,
     BeginStringError,
     FixError,
     Message,
@@ -50,6 +52,7 @@ class FixSession:
         self.sessions = {} if sessions is None else sessions
         self.sender_comp_id = sender_comp_id
         self.target_comp_id: str | None = None
+        self.begin_string: str | None = None
         self.next_out = 1
         self.next_in = 1
         self.logged_on = False
@@ -86,6 +89,9 @@ class FixSession:
                 return False
             log.warning("ignoring garbled message: %s", exc)
             return True
+        if self.logged_on and msg.get(Tag.BEGIN_STRING) != self.begin_string:
+            await self.logout(f"BeginString {msg.get(Tag.BEGIN_STRING)} does not match this session's {self.begin_string}")
+            return False
         seq_text = msg.get(Tag.MSG_SEQ_NUM, "")
         if not seq_text.isdigit():
             if self.logged_on:
@@ -135,6 +141,7 @@ class FixSession:
             log.warning("%s already has a live session; disconnecting the second connection", sender)
             return False
         self.target_comp_id = sender
+        self.begin_string = msg.get(Tag.BEGIN_STRING)
         if seq != 1:
             await self.logout(f"Expected MsgSeqNum 1 at Logon (sessions are not persisted), received {seq}")
             return False
@@ -193,9 +200,14 @@ class FixSession:
             await self.send(MsgType.LOGOUT, [])
             return False
         if kind in APPLICATION:
+            problem = fix42.inbound_problem(msg) if self.begin_string == fix42.BEGIN_STRING else None
+            if problem:
+                await self.reject(seq, *problem)
+                return True
             await deliver(self.sessions, self.engine.handle(msg), self)
             return True
-        if not MsgType.is_defined(kind):
+        defined = fix42.defines(kind) if self.begin_string == fix42.BEGIN_STRING else MsgType.is_defined(kind)
+        if not defined:
             await self.reject(seq, Tag.MSG_TYPE, RejectReason.INVALID_MSG_TYPE, f"Invalid MsgType {kind}")
             return True
         await self.send(MsgType.BUSINESS_MESSAGE_REJECT, [
@@ -250,5 +262,7 @@ class FixSession:
             header.append((Tag.ORIG_SENDING_TIME, now))
         if seq is None:
             self.next_out += 1
-        self._writer.write(encode(header + fields))
+        if self.begin_string == fix42.BEGIN_STRING:
+            fields = fix42.outbound(msg_type, fields)
+        self._writer.write(encode(header + fields, self.begin_string or BEGIN_STRING))
         await self._writer.drain()

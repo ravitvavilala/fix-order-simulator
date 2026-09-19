@@ -5,38 +5,43 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from fixsim.fix import Message, MsgType, Tag, decode, encode, split_frames
+from fixsim.fix import BEGIN_STRING, Message, MsgType, Tag, decode, encode, split_frames
 from fixsim.session import APPLICATION, utc_timestamp
 
-EXEC_TYPE = {"0": "New", "4": "Canceled", "5": "Replaced", "6": "PendingCancel", "8": "Rejected",
+EXEC_TYPE = {"0": "New", "1": "PartialFill", "2": "Fill", "4": "Canceled", "5": "Replaced", "6": "PendingCancel", "8": "Rejected",
              "E": "PendingReplace", "F": "Trade"}
-ORD_STATUS = {"0": "New", "1": "PartiallyFilled", "2": "Filled", "4": "Canceled", "6": "PendingCancel",
+ORD_STATUS = {"0": "New", "1": "PartiallyFilled", "2": "Filled", "4": "Canceled", "5": "Replaced", "6": "PendingCancel",
               "8": "Rejected", "E": "PendingReplace"}
 MSG_NAME = {"0": "Heartbeat", "2": "ResendRequest", "3": "Reject", "4": "SequenceReset", "5": "Logout",
             "8": "ExecutionReport", "9": "OrderCancelReject", "A": "Logon", "j": "BusinessMessageReject"}
 
 
 class FixClient:
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, sender: str = "CLIENT1"):
-        self.reader, self.writer, self.sender = reader, writer, sender
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, sender: str = "CLIENT1",
+                 begin_string: str = BEGIN_STRING):
+        self.reader, self.writer, self.sender, self.begin_string = reader, writer, sender, begin_string
         self.seq = 1
         self.eof = False
         self._buffer = b""
         self._pending: list[Message] = []
 
     @classmethod
-    async def connect(cls, host: str, port: int, sender: str = "CLIENT1") -> "FixClient":
+    async def connect(cls, host: str, port: int, sender: str = "CLIENT1",
+                      begin_string: str = BEGIN_STRING) -> "FixClient":
         reader, writer = await asyncio.open_connection(host, port)
-        return cls(reader, writer, sender)
+        return cls(reader, writer, sender, begin_string)
 
     async def send(self, msg_type: str, fields: list[tuple[int, object]], seq: int | None = None) -> None:
         if msg_type in APPLICATION and not any(t == Tag.TRANSACT_TIME for t, _ in fields):
             fields = [*fields, (Tag.TRANSACT_TIME, utc_timestamp())]
+        needs_handl_inst = msg_type in (MsgType.NEW_ORDER_SINGLE, MsgType.ORDER_CANCEL_REPLACE_REQUEST)
+        if self.begin_string == "FIX.4.2" and needs_handl_inst and not any(t == Tag.HANDL_INST for t, _ in fields):
+            fields = [*fields, (Tag.HANDL_INST, "1")]
         body = [(Tag.MSG_TYPE, msg_type), (Tag.SENDER_COMP_ID, self.sender), (Tag.TARGET_COMP_ID, "SIMROUTER"),
                 (Tag.MSG_SEQ_NUM, seq if seq is not None else self.seq), (Tag.SENDING_TIME, utc_timestamp()), *fields]
         if seq is None:
             self.seq += 1
-        self.writer.write(encode(body))
+        self.writer.write(encode(body, self.begin_string))
         await self.writer.drain()
 
     async def receive(self, timeout: float = 2.0) -> Message | None:
@@ -101,8 +106,8 @@ async def scenario(client: FixClient, title: str, msg_type: str, fields: list, w
         print("  <-", describe(msg))
 
 
-async def main(host: str, port: int) -> None:
-    client = await FixClient.connect(host, port)
+async def main(host: str, port: int, begin_string: str = BEGIN_STRING) -> None:
+    client = await FixClient.connect(host, port, begin_string=begin_string)
     print("  <-", describe(await client.logon()))
     await scenario(client, "1. Buy 400 AAPL @ 190.00 DAY: sweep best price across venues, rest the remainder for rebate",
                    MsgType.NEW_ORDER_SINGLE, order("A1", "AAPL", "1", 400, 190.00))
@@ -135,5 +140,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9878)
+    parser.add_argument("--begin-string", default=BEGIN_STRING, choices=("FIX.4.2", "FIX.4.4"))
     args = parser.parse_args()
-    asyncio.run(main(args.host, args.port))
+    asyncio.run(main(args.host, args.port, args.begin_string))

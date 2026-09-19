@@ -1,4 +1,4 @@
-"""FIX 4.4 tag=value codec: encoding, validation and stream framing."""
+"""FIX 4.2 / 4.4 tag=value codec: encoding, validation and stream framing."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 SOH = "\x01"
 BEGIN_STRING = "FIX.4.4"
+SUPPORTED_BEGIN_STRINGS = ("FIX.4.2", "FIX.4.4")
 
 
 class Tag:
@@ -26,6 +27,8 @@ class Tag:
     BUSINESS_REJECT_REASON = 380
     CHECKSUM = 10
     AVG_PX = 6
+    EXEC_TRANS_TYPE = 20
+    HANDL_INST = 21
     BEGIN_SEQ_NO = 7
     CL_ORD_ID = 11
     CUM_QTY = 14
@@ -147,7 +150,7 @@ def _fmt(value: object) -> str:
     return str(value)
 
 
-def encode(body: list[tuple[int, object]]) -> bytes:
+def encode(body: list[tuple[int, object]], begin_string: str = BEGIN_STRING) -> bytes:
     """Wrap body fields (starting with 35=MsgType) with BeginString, BodyLength and CheckSum."""
     if not body or body[0][0] != Tag.MSG_TYPE:
         raise FixError("body must start with tag 35 (MsgType)")
@@ -155,7 +158,7 @@ def encode(body: list[tuple[int, object]]) -> bytes:
     if empty is not None:
         raise FixError(f"tag {empty} has no value")
     body_str = "".join(f"{t}={_fmt(v)}{SOH}" for t, v in body)
-    head = f"{Tag.BEGIN_STRING}={BEGIN_STRING}{SOH}{Tag.BODY_LENGTH}={len(body_str.encode())}{SOH}"
+    head = f"{Tag.BEGIN_STRING}={begin_string}{SOH}{Tag.BODY_LENGTH}={len(body_str.encode())}{SOH}"
     raw = (head + body_str).encode()
     return raw + f"{Tag.CHECKSUM}={sum(raw) % 256:03d}{SOH}".encode()
 
@@ -179,7 +182,7 @@ def decode(raw: bytes) -> Message:
     expected = sum(text[:checksum_at].encode()) % 256
     if f"{expected:03d}" != trailer.group(1):
         raise FixError(f"CheckSum {trailer.group(1)} does not match computed {expected:03d}")
-    if head.group(1) != BEGIN_STRING:
+    if head.group(1) not in SUPPORTED_BEGIN_STRINGS:
         raise BeginStringError(f"unsupported BeginString {head.group(1)}")
     pairs: list[tuple[int, str]] = []
     error = None
